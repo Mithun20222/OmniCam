@@ -1,0 +1,38 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pkl
+*.log
+
+# Virtual environment
+.venv/
+
+# OS-specific
+.DS_Store
+Thumbs.db
+
+# IDE-specific
+.vscode/
+.idea/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Data (your authorized images and any captured faces)
+data/authorized/*
+!data/authorized/.gitkeep
+
+# Models (if DeepFace or other libs download them locally)
+*.h5
+*.pt
+*.pth
+*.onnx
+
+# Temporary files
+*.tmp
+*.swp
+*.bak
