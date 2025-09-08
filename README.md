@@ -10,5 +10,3 @@ It recognizes authorized users, detects intruders, and keeps track of their stat
 - 🎥 Real-time detection from webcam.
 - 🟢 Stable labels with smoothing (no flickering).
 - 🔒 Authorized face embeddings loaded from `data/authorized/`.
-
-## 📂 Project Structure
