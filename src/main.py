@@ -8,21 +8,8 @@ from supabase import create_client, Client
 from dotenv import load_dotenv
 import tempfile
 import uuid
-import requests
 
-def send_telegram_alert(intruder_id, photo_url):
-    token = os.getenv("TELEGRAM_BOT_TOKEN")
-    chat_id = os.getenv("TELEGRAM_CHAT_ID")
-    message = f"🚨 Intruder Detected!\n\nID: {intruder_id}\nPhoto: {photo_url}"
-    try:
-        requests.post(
-            f"https://api.telegram.org/bot{token}/sendMessage",
-            data={"chat_id": chat_id, "text": message}
-        )
-        print("📲 Telegram alert sent")
-    except Exception as e:
-        print("❌ Telegram failed:", e)
-
+# ---------- Supabase Setup ----------
 load_dotenv()
 url = os.getenv("SUPABASE_URL")
 key = os.getenv("SUPABASE_KEY")
@@ -33,45 +20,51 @@ if not url or not key:
 supabase: Client = create_client(url, key)
 
 def save_intruder(intruder_id, emb, face_crop, camera_id="cam_0"):
-    # Save temp image
     tmp_file = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
     cv2.imwrite(tmp_file.name, face_crop)
 
-    # Unique filename for storage
     file_name = f"{intruder_id}_{uuid.uuid4().hex}.jpg"
-    file_path = f"intruder-photos/{file_name}"
 
-    # Upload to Supabase storage
-    with open(tmp_file.name, "rb") as f:
-        supabase.storage.from_("intruder-photos").upload(file_path, f, {"upsert": True})
+    try:
+        with open(tmp_file.name, "rb") as f:
+            response = supabase.storage.from_("intruder-photos").upload(
+                file_name,
+                f,
+                {"content-type": "image/jpeg", "x-upsert": "true"}
+            )
 
-    # Get public URL
-    photo_url = supabase.storage.from_("intruder-photos").get_public_url(file_path)
+        if hasattr(response, "error") and response.error:
+            print(f"Upload error: {response.error}")
+            return
 
-    # Insert event into table
-    data = {
-        "intruder_id": intruder_id,
-        "camera_id": camera_id,
-        "embedding": emb.tolist(),
-        "photo_url": photo_url
-    }
-    supabase.table("intruders").insert(data).execute()
+        photo_url = supabase.storage.from_("intruder-photos").get_public_url(file_name)
 
-    print(f"☁️ Logged intruder {intruder_id} with photo → {photo_url}")
-    send_telegram_alert(intruder_id, photo_url)
+        data = {
+            "intruder_id": intruder_id,
+            "camera_id": camera_id,
+            "embedding": emb.tolist(),
+            "photo_url": photo_url,
+        }
 
+        supabase.table("intruders").insert(data).execute()
+        print(f"Logged intruder {intruder_id} with photo → {photo_url}")
 
-# ---------------- Globals ----------------
+    except Exception as e:
+        print("Upload failed → Check your Supabase storage policies for bucket 'intruder-photos'")
+        print("Error details:", e)
+
+# ---------- Globals ----------
 AUTHORIZED_DIR = "data/authorized"
-flags = {}                  
-intruder_embeddings = {}    
-intruder_count = 0          
-intruder_buffer = []        
+flags = {}
+intruder_embeddings = {}
+intruder_count = 0
+intruder_buffer = []
 recent_labels = deque(maxlen=5)
-last_seen = {}              
-RESET_TIME = 3600  # 1 hour
+last_seen = {}
+RESET_TIME = 3600 
 
-# ---------------- Step 1: Build embeddings ----------------
+
+# ---------- Step 1: Build embeddings ----------
 def build_embeddings():
     embeddings = {}
     for person in os.listdir(AUTHORIZED_DIR):
@@ -87,7 +80,7 @@ def build_embeddings():
                     img_path=img_path,
                     model_name="SFace",
                     detector_backend="opencv",
-                    enforce_detection=False
+                    enforce_detection=False,
                 )[0]["embedding"]
                 reps.append(rep)
             except Exception as e:
@@ -96,13 +89,15 @@ def build_embeddings():
         if reps:
             embeddings[person] = reps
             flags[person] = 0
-            print(f"✅ Loaded {len(reps)} embeddings for {person}")
+            print(f"Loaded {len(reps)} embeddings for {person}")
     return embeddings
 
-# ---------------- Step 2: Cosine similarity ----------------
+
+# ---------- Step 2: Cosine similarity ----------
 def cosine_distance(a, b):
     a, b = np.array(a), np.array(b)
     return 1 - np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
+
 
 def recognize_face(frame, known_embeddings, threshold=0.6):
     try:
@@ -110,7 +105,7 @@ def recognize_face(frame, known_embeddings, threshold=0.6):
             frame,
             model_name="SFace",
             detector_backend="opencv",
-            enforce_detection=False
+            enforce_detection=False,
         )[0]["embedding"]
 
         best_match = None
@@ -130,7 +125,8 @@ def recognize_face(frame, known_embeddings, threshold=0.6):
         print("Recognition error:", e)
     return None, None
 
-# ---------------- Step 3: Run recognition ----------------
+
+# ---------- Step 3: Run recognition ----------
 def run_face_recognition(camera_index=0):
     global intruder_count, intruder_buffer
     known_embeddings = build_embeddings()
@@ -139,7 +135,7 @@ def run_face_recognition(camera_index=0):
     )
     cap = cv2.VideoCapture(camera_index)
 
-    print("✅ Press 'q' to quit")
+    print("Press 'q' to quit")
 
     while True:
         ret, frame = cap.read()
@@ -161,7 +157,7 @@ def run_face_recognition(camera_index=0):
 
             recognized, emb = recognize_face(face_crop, known_embeddings)
 
-            if recognized:  # ✅ Authorized face
+            if recognized:
                 intruder_buffer.clear()
                 last_seen[recognized] = time.time()
 
@@ -170,51 +166,33 @@ def run_face_recognition(camera_index=0):
                 label, color = f"Authorized: {recognized}", (0, 255, 0)
 
             else:
-                # ✅ Respect flags: if already authorized, skip intruder logic
-                authorized_found = False
-                for person, status in flags.items():
-                    if status == 1:
-                        label, color = f"Authorized: {person}", (0, 255, 0)
-                        authorized_found = True
+                matched_intruder = None
+                for intruder_id, reps in intruder_embeddings.items():
+                    for ref_emb in reps:
+                        dist = cosine_distance(emb, ref_emb)
+                        if dist < 0.5:
+                            matched_intruder = intruder_id
+                            break
+                    if matched_intruder:
                         break
 
-                if not authorized_found:
-                    # Reset flags if last seen > 1 hr
-                    for person, status in flags.items():
-                        if status == 1 and person in last_seen:
-                            if time.time() - last_seen[person] > RESET_TIME:
-                                flags[person] = 0
-                                print(f"⏳ Resetting {person}'s flag to 0 (inactive >1 hr)")
-
-                    # Intruder logic
-                    matched_intruder = None
-                    for intruder_id, reps in intruder_embeddings.items():
-                        for ref_emb in reps:
-                            dist = cosine_distance(emb, ref_emb)
-                            if dist < 0.5:
-                                matched_intruder = intruder_id
-                                break
-                        if matched_intruder:
-                            break
-
-                    if matched_intruder:
-                        label, color = f"Intruder ({matched_intruder})", (0, 0, 255)
+                if matched_intruder:
+                    label, color = f"Intruder ({matched_intruder})", (0, 0, 255)
+                    intruder_buffer.clear()
+                else:
+                    intruder_buffer.append(emb)
+                    if len(intruder_buffer) >= 8:
+                        intruder_id = f"intruder_{intruder_count}"
+                        intruder_embeddings[intruder_id] = [emb]
+                        flags[intruder_id] = -1
+                        save_intruder(intruder_id, np.array(emb), face_crop)
+                        intruder_count += 1
+                        label, color = f"Intruder ({intruder_id})", (0, 0, 255)
                         intruder_buffer.clear()
+                        print(f"Intruder detected: {intruder_id}")
                     else:
-                        intruder_buffer.append(emb)
-                        if len(intruder_buffer) >= 8:
-                            intruder_id = f"intruder_{intruder_count}"
-                            intruder_embeddings[intruder_id] = [emb]
-                            flags[intruder_id] = -1
-                            save_intruder(intruder_id, np.array(emb), face_crop)
-                            intruder_count += 1
-                            label, color = f"Intruder ({intruder_id})", (0, 0, 255)
-                            intruder_buffer.clear()
-                            print(f"⚠️ Intruder detected: {intruder_id}")
-                        else:
-                            label, color = "Verifying...", (0, 255, 255)
+                        label, color = "Verifying...", (0, 255, 255)
 
-            # Smooth labels
             recent_labels.append(label)
             stable_label = max(set(recent_labels), key=recent_labels.count)
 
@@ -233,5 +211,6 @@ def run_face_recognition(camera_index=0):
     cv2.destroyAllWindows()
     print("Final Flags:", flags)
 
+
 if __name__ == "__main__":
-    run_face_recognition(0)  # change to your webcam index
+    run_face_recognition(0)  # webcam index
