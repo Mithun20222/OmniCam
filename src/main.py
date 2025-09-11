@@ -8,18 +8,37 @@ from supabase import create_client, Client
 from dotenv import load_dotenv
 import tempfile
 import uuid
+import requests
 
-# ---------- Supabase Setup ----------
+# ---------- Load ENV ----------
 load_dotenv()
-url = os.getenv("SUPABASE_URL")
-key = os.getenv("SUPABASE_KEY")
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-if not url or not key:
-    raise ValueError("Supabase credentials not found. Check your .env file.")
+if not SUPABASE_URL or not SUPABASE_KEY:
+    raise ValueError("❌ Supabase credentials not found. Check your .env file.")
 
-supabase: Client = create_client(url, key)
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# ---------- Upload + Log ----------
+# ---------- Telegram Alert ----------
+def send_telegram_alert(message, photo_path=None):
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": message})
+
+        if photo_path:
+            url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
+            with open(photo_path, "rb") as photo:
+                requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID}, files={"photo": photo})
+
+        print(f"📲 Telegram alert sent: {message}")
+    except Exception as e:
+        print("❌ Telegram error:", e)
+
+
+# ---------- Upload + Log Intruder ----------
 def save_intruder(intruder_id, emb, face_crop, camera_id="cam_0"):
     tmp_file = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
     cv2.imwrite(tmp_file.name, face_crop)
@@ -27,6 +46,7 @@ def save_intruder(intruder_id, emb, face_crop, camera_id="cam_0"):
     file_name = f"{intruder_id}_{uuid.uuid4().hex}.jpg"
 
     try:
+        # Upload to Supabase
         with open(tmp_file.name, "rb") as f:
             supabase.storage.from_("intruder-photos").upload(
                 file_name,
@@ -34,21 +54,26 @@ def save_intruder(intruder_id, emb, face_crop, camera_id="cam_0"):
                 {"content-type": "image/jpeg", "x-upsert": "true"}
             )
 
+        # Get public URL
         photo_url = supabase.storage.from_("intruder-photos").get_public_url(file_name)
 
+        # Save metadata in DB
         data = {
             "intruder_id": intruder_id,
             "camera_id": camera_id,
             "embedding": emb.tolist(),
             "photo_url": photo_url,
         }
-
         supabase.table("intruders").insert(data).execute()
-        print(f"Logged intruder {intruder_id} with photo → {photo_url}")
+
+        print(f"☁️ Logged intruder {intruder_id} → {photo_url}")
+
+        # 🚨 Send Telegram Alert
+        send_telegram_alert(f"⚠️ Intruder detected: {intruder_id}\nCamera: {camera_id}", tmp_file.name)
 
     except Exception as e:
-        print("Upload failed → Check your Supabase storage policies for bucket 'intruder-photos'")
-        print("Error details:", e)
+        print("❌ Upload failed (check Supabase policies or bucket settings)")
+        print("   Error:", e)
 
 
 # ---------- Globals ----------
@@ -62,7 +87,7 @@ last_seen = {}
 RESET_TIME = 3600  # 1 hour
 
 
-# ---------- Step 1: Build embeddings ----------
+# ---------- Build embeddings ----------
 def build_embeddings():
     embeddings = {}
     for person in os.listdir(AUTHORIZED_DIR):
@@ -87,11 +112,11 @@ def build_embeddings():
         if reps:
             embeddings[person] = reps
             flags[person] = 0
-            print(f"Loaded {len(reps)} embeddings for {person}")
+            print(f"✅ Loaded {len(reps)} embeddings for {person}")
     return embeddings
 
 
-# ---------- Step 2: Cosine similarity ----------
+# ---------- Recognition ----------
 def cosine_distance(a, b):
     a, b = np.array(a), np.array(b)
     return 1 - np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
@@ -124,7 +149,7 @@ def recognize_face(frame, known_embeddings, threshold=0.6):
     return None, None
 
 
-# ---------- Step 3: Run recognition ----------
+# ---------- Main Loop ----------
 def run_face_recognition(camera_index=0):
     global intruder_count, intruder_buffer
     known_embeddings = build_embeddings()
@@ -133,7 +158,7 @@ def run_face_recognition(camera_index=0):
     )
     cap = cv2.VideoCapture(camera_index)
 
-    print("Press 'q' to quit")
+    print("✅ Press 'q' to quit")
 
     while True:
         ret, frame = cap.read()
@@ -155,7 +180,7 @@ def run_face_recognition(camera_index=0):
 
             recognized, emb = recognize_face(face_crop, known_embeddings)
 
-            if recognized:  # Authorized
+            if recognized:  # ✅ Authorized
                 intruder_buffer.clear()
                 last_seen[recognized] = time.time()
 
@@ -163,7 +188,7 @@ def run_face_recognition(camera_index=0):
                     flags[recognized] = 1
                 label, color = f"Authorized: {recognized}", (0, 255, 0)
 
-            else:  # Intruder check
+            else:  # 🚨 Intruder
                 matched_intruder = None
                 for intruder_id, reps in intruder_embeddings.items():
                     for ref_emb in reps:
@@ -179,7 +204,7 @@ def run_face_recognition(camera_index=0):
                     intruder_buffer.clear()
                 else:
                     intruder_buffer.append(emb)
-                    if len(intruder_buffer) >= 8:  # only after 8 frames
+                    if len(intruder_buffer) >= 8:  # Confirm intruder
                         intruder_id = f"intruder_{intruder_count}"
                         intruder_embeddings[intruder_id] = [emb]
                         flags[intruder_id] = -1
@@ -211,4 +236,4 @@ def run_face_recognition(camera_index=0):
 
 
 if __name__ == "__main__":
-    run_face_recognition(0)  # change to your webcam index
+    run_face_recognition(0)  # change camera index if needed
