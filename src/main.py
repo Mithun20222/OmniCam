@@ -18,7 +18,7 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 if not SUPABASE_URL or not SUPABASE_KEY:
-    raise ValueError("❌ Supabase credentials not found. Check your .env file.")
+    raise ValueError("Supabase credentials not found. Check your .env file.")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
@@ -35,7 +35,7 @@ def send_telegram_alert(message, photo_path=None):
 
         print(f"📲 Telegram alert sent: {message}")
     except Exception as e:
-        print("❌ Telegram error:", e)
+        print("Telegram error:", e)
 
 
 # ---------- Upload + Log Intruder ----------
@@ -66,14 +66,13 @@ def save_intruder(intruder_id, emb, face_crop, camera_id="cam_0"):
         }
         supabase.table("intruders").insert(data).execute()
 
-        print(f"☁️ Logged intruder {intruder_id} → {photo_url}")
+        print(f"Logged intruder {intruder_id} → {photo_url}")
 
-        # 🚨 Send Telegram Alert
-        send_telegram_alert(f"⚠️ Intruder detected: {intruder_id}\nCamera: {camera_id}", tmp_file.name)
+        send_telegram_alert(f"Intruder detected: {intruder_id}\nCamera: {camera_id}", tmp_file.name)
 
     except Exception as e:
-        print("❌ Upload failed (check Supabase policies or bucket settings)")
-        print("   Error:", e)
+        print("Upload failed (check Supabase policies or bucket settings)")
+        print("Error:", e)
 
 
 # ---------- Globals ----------
@@ -112,7 +111,7 @@ def build_embeddings():
         if reps:
             embeddings[person] = reps
             flags[person] = 0
-            print(f"✅ Loaded {len(reps)} embeddings for {person}")
+            print(f"Loaded {len(reps)} embeddings for {person}")
     return embeddings
 
 
@@ -158,7 +157,7 @@ def run_face_recognition(camera_index=0):
     )
     cap = cv2.VideoCapture(camera_index)
 
-    print("✅ Press 'q' to quit")
+    print("Press 'q' to quit")
 
     while True:
         ret, frame = cap.read()
@@ -180,7 +179,7 @@ def run_face_recognition(camera_index=0):
 
             recognized, emb = recognize_face(face_crop, known_embeddings)
 
-            if recognized:  # ✅ Authorized
+            if recognized:  # Authorized
                 intruder_buffer.clear()
                 last_seen[recognized] = time.time()
 
@@ -188,7 +187,7 @@ def run_face_recognition(camera_index=0):
                     flags[recognized] = 1
                 label, color = f"Authorized: {recognized}", (0, 255, 0)
 
-            else:  # 🚨 Intruder
+            else:  # Intruder
                 matched_intruder = None
                 for intruder_id, reps in intruder_embeddings.items():
                     for ref_emb in reps:
@@ -204,7 +203,7 @@ def run_face_recognition(camera_index=0):
                     intruder_buffer.clear()
                 else:
                     intruder_buffer.append(emb)
-                    if len(intruder_buffer) >= 8:  # Confirm intruder
+                    if len(intruder_buffer) >= 5:  # Confirm intruder
                         intruder_id = f"intruder_{intruder_count}"
                         intruder_embeddings[intruder_id] = [emb]
                         flags[intruder_id] = -1
@@ -212,7 +211,7 @@ def run_face_recognition(camera_index=0):
                         intruder_count += 1
                         label, color = f"Intruder ({intruder_id})", (0, 0, 255)
                         intruder_buffer.clear()
-                        print(f"⚠️ Intruder detected: {intruder_id}")
+                        print(f"Intruder detected: {intruder_id}")
                     else:
                         label, color = "Verifying...", (0, 255, 255)
 
