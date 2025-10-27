@@ -27,7 +27,7 @@ def find_working_cameras():
     """Find all working cameras on the system."""
     working_cameras = {}
     
-    print("🔍 Scanning for available cameras...")
+    print("Scanning for available cameras...")
     
     # Try different backends in order of preference, but skip DirectShow if it fails
     backends = [
@@ -49,7 +49,7 @@ def find_working_cameras():
         pass
     
     if not dshow_works:
-        print("⚠️ DirectShow not working on this system, skipping...")
+        print("DirectShow not working on this system, skipping...")
         backends = [b for b in backends if b[0] != cv2.CAP_DSHOW]
     
     for backend, backend_name in backends:
@@ -63,7 +63,7 @@ def find_working_cameras():
                     # Try to read a frame to confirm it's working
                     ret, frame = cap.read()
                     if ret and frame is not None:
-                        print(f"✅ Found working camera {i} with {backend_name}")
+                        print(f"Found working camera {i} with {backend_name}")
                         working_cameras[i] = {
                             "id": f"cam{i+1}",
                             "location": f"Camera {i+1}",
@@ -74,12 +74,12 @@ def find_working_cameras():
                 else:
                     cap.release()
             except Exception as e:
-                print(f"⚠️ Error testing camera {i} with {backend_name}: {e}")
+                print(f"Error testing camera {i} with {backend_name}: {e}")
                 if 'cap' in locals():
                     cap.release()
     
     if not working_cameras:
-        print("❌ No working cameras found!")
+        print("No working cameras found!")
         # Fallback to default camera 0 with ANY backend
         working_cameras[0] = {
             "id": "cam1", 
@@ -87,7 +87,7 @@ def find_working_cameras():
             "backend": cv2.CAP_ANY,
             "backend_name": "Default"
         }
-        print("⚠️ Using fallback camera configuration")
+        print("Using fallback camera configuration")
     
     return working_cameras
 
@@ -139,10 +139,10 @@ def save_intruder(intruder_id, emb, face_crop, camera_id="cam_0"):
             "photo_url": photo_url,
         }
         supabase.table("intruders").insert(data).execute()
-        print(f"☁️ Logged intruder {intruder_id} with photo → {photo_url}")
+        print(f"Logged intruder {intruder_id} with photo → {photo_url}")
 
     except Exception as e:
-        print("❌ Upload failed → Check Supabase policies for bucket 'intruder-photos'")
+        print("Upload failed → Check Supabase policies for bucket 'intruder-photos'")
         print("Error details:", e)
 
 
@@ -168,7 +168,7 @@ def build_embeddings():
         if reps:
             embeddings[person] = reps
             flags[person] = 0
-    print(f"✅ Loaded {len(embeddings)} authorized identities.")
+    print(f"Loaded {len(embeddings)} authorized identities.")
     return embeddings
 
 
@@ -286,10 +286,10 @@ def run_camera(camera_id, known_embeddings):
     
     cap = cv2.VideoCapture(camera_id, backend)
     if not cap.isOpened():
-        print(f"❌ Failed to open camera {camera_id} with {backend_name}")
+        print(f"Failed to open camera {camera_id} with {backend_name}")
         return
     
-    print(f"✅ Camera {camera_id} opened successfully with {backend_name}")
+    print(f"Camera {camera_id} opened successfully with {backend_name}")
     
     # Set camera properties for better performance
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
@@ -391,11 +391,11 @@ def gen_frames(camera_id=0):
     backend = camera_info.get("backend", cv2.CAP_ANY)
     backend_name = camera_info.get("backend_name", "Default")
     
-    print(f"📺 Starting stream for camera {camera_id} with {backend_name} backend...")
+    print(f"Starting stream for camera {camera_id} with {backend_name} backend...")
     
     cap = cv2.VideoCapture(int(camera_id), backend)
     if not cap.isOpened():
-        print(f"❌ Failed to open camera {camera_id} for streaming with {backend_name}")
+        print(f"Failed to open camera {camera_id} for streaming with {backend_name}")
         # Return a blank frame or error image instead of returning nothing
         import io
         from PIL import Image, ImageDraw, ImageFont
@@ -418,7 +418,7 @@ def gen_frames(camera_id=0):
             time.sleep(1)  # Update every second
         return
         
-    print(f"✅ Camera {camera_id} stream started successfully with {backend_name}")
+    print(f"Camera {camera_id} stream started successfully with {backend_name}")
     
     # Set camera properties for streaming
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
@@ -430,7 +430,7 @@ def gen_frames(camera_id=0):
         while True:
             success, frame = cap.read()
             if not success:
-                print(f"❌ Failed to read frame from camera {camera_id}")
+                print(f"Failed to read frame from camera {camera_id}")
                 time.sleep(0.1)
                 continue
                 
@@ -443,10 +443,10 @@ def gen_frames(camera_id=0):
             yield (b'--frame\r\n'
                    b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
     except Exception as e:
-        print(f"❌ Error in gen_frames for camera {camera_id}: {e}")
+        print(f"Error in gen_frames for camera {camera_id}: {e}")
     finally:
         cap.release()
-        print(f"📺 Stream ended for camera {camera_id}")
+        print(f"Stream ended for camera {camera_id}")
 
 
 @app.get("/camera_feed/{camera_id}")
@@ -459,19 +459,19 @@ def camera_feed(camera_id: int):
     # Convert 1-based URL parameter to 0-based camera index
     actual_camera_id = camera_id - 1
     
-    print(f"📺 Camera feed requested for camera {camera_id} (actual index: {actual_camera_id})")
+    print(f"Camera feed requested for camera {camera_id} (actual index: {actual_camera_id})")
     
     # Verify camera exists
     if actual_camera_id not in cameras:
-        print(f"❌ Camera {actual_camera_id} not found in cameras dict")
+        print(f"Camera {actual_camera_id} not found in cameras dict")
         print(f"Available cameras: {list(cameras.keys())}")
         # Return the first available camera as fallback
         if cameras:
             actual_camera_id = list(cameras.keys())[0]
-            print(f"⚠️ Using fallback camera {actual_camera_id}")
+            print(f"Using fallback camera {actual_camera_id}")
         else:
             actual_camera_id = 0
-            print(f"⚠️ No cameras available, using default camera 0")
+            print(f"No cameras available, using default camera 0")
     
     return StreamingResponse(
         gen_frames(actual_camera_id),
@@ -483,7 +483,7 @@ def camera_feed(camera_id: int):
 def startup_event():
     known_embeddings = build_embeddings()
     
-    print(f"🚀 Starting OmniCam with {len(cameras)} detected camera(s)")
+    print(f"Starting OmniCam with {len(cameras)} detected camera(s)")
     
     # Start camera threads for all detected cameras
     for cam_id, cam_info in cameras.items():
