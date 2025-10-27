@@ -10,6 +10,7 @@ function App() {
   const [latest, setLatest] = useState(null);
   const [verificationStatus, setVerificationStatus] = useState(null);
   const [notifiedIntruders, setNotifiedIntruders] = useState(new Set());
+  const [currentIntruderAlert, setCurrentIntruderAlert] = useState(null);
 
   useEffect(() => {
     // Load cameras
@@ -65,15 +66,22 @@ function App() {
         setEvents((prev) => [event, ...prev].slice(0, 50));
         setVerificationStatus(null);
 
-        // Only show notification for NEW intruders (not already notified)
+        // Only update the alert panel for NEW intruders with snapshots
         if (
           event.label &&
           event.label.toLowerCase().includes("intruder") &&
-          !event.label.toLowerCase().includes("verifying")
+          !event.label.toLowerCase().includes("verifying") &&
+          event.image_path // Only if there's a snapshot
         ) {
           // Extract intruder ID from label like "Intruder (intruder_0)"
           const intruderMatch = event.label.match(/intruder_\d+/);
           const intruderId = intruderMatch ? intruderMatch[0] : event.id;
+
+          // Update the alert panel with this new intruder
+          setCurrentIntruderAlert({
+            ...event,
+            intruderId: intruderId,
+          });
 
           // Only notify if we haven't notified about this intruder yet
           setNotifiedIntruders((prev) => {
@@ -178,18 +186,18 @@ function App() {
         {/* Top-right: Recent alerts preview */}
         <div className="panel frame-like event-panel">
           <div className="panel-header">
-            <div className="location-label">Event history</div>
-            <div className="subtext">Recent alerts & quick preview</div>
+            <div className="location-label">Latest Alert</div>
+            <div className="subtext">Most recent detection</div>
           </div>
 
           <div className="panel-body event-scroll">
-            {/* Intruder preview card (prominent) */}
-            {latest ? (
+            {/* Only show the LATEST intruder alert (stays until new intruder) */}
+            {currentIntruderAlert ? (
               <div className="intruder-preview">
                 <div className="preview-image-container">
-                  {latest.image_path ? (
+                  {currentIntruderAlert.image_path ? (
                     <img
-                      src={`http://localhost:8000/snapshot/${latest.id}`}
+                      src={`http://localhost:8000/snapshot/${currentIntruderAlert.id}`}
                       alt="Intruder snapshot"
                       className="preview-image"
                       onError={(e) => {
@@ -203,42 +211,36 @@ function App() {
 
                 <div className="preview-details">
                   <div className="detail-section">
-                    <div className="detail-label">Location & Time</div>
-                    <div className="detail-value">{latest.location}</div>
+                    <div className="detail-label">Event Type</div>
+                    <div className="detail-value">
+                      {currentIntruderAlert.label}
+                    </div>
+                  </div>
+                  <div className="detail-section">
+                    <div className="detail-label">Location</div>
+                    <div className="detail-value">
+                      {currentIntruderAlert.location}
+                    </div>
+                  </div>
+                  <div className="detail-section">
+                    <div className="detail-label">Time</div>
                     <div className="detail-timestamp">
-                      {new Date(latest.timestamp).toLocaleString()}
+                      {new Date(
+                        currentIntruderAlert.timestamp
+                      ).toLocaleString()}
                     </div>
                   </div>
                   <div className="detail-section">
                     <div className="detail-label">Camera</div>
-                    <div className="detail-value">{latest.camera_id}</div>
+                    <div className="detail-value">
+                      {currentIntruderAlert.camera_id}
+                    </div>
                   </div>
                 </div>
               </div>
             ) : (
-              <div className="no-alerts">No recent alerts</div>
+              <div className="no-alerts">No intruder alerts yet</div>
             )}
-
-            {/* Compact list of recent events */}
-            <div className="event-list">
-              {events.slice(0, 6).map((e) => (
-                <div key={e.id} className="event-item">
-                  <div className="event-info">
-                    <div className="event-label">{e.label}</div>
-                    <div className="event-meta">
-                      {e.location} • {new Date(e.timestamp).toLocaleString()}
-                    </div>
-                  </div>
-                  <div className="event-badge">
-                    {e.label.toLowerCase().includes("intruder") ? (
-                      <span className="badge-intruder">INTRUDER</span>
-                    ) : (
-                      <span className="badge-authorized">AUTHORIZED</span>
-                    )}
-                  </div>
-                </div>
-              ))}
-            </div>
           </div>
         </div>
 

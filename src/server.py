@@ -123,9 +123,11 @@ except Exception as e:
 
 
 def save_intruder(intruder_id, emb, face_crop, camera_id="cam_0"):
+    """Upload intruder image + metadata to Supabase and return photo URL"""
     tmp_file = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
     cv2.imwrite(tmp_file.name, face_crop)
     file_name = f"{intruder_id}_{uuid.uuid4().hex}.jpg"
+    photo_url = None
 
     try:
         with open(tmp_file.name, "rb") as f:
@@ -136,6 +138,7 @@ def save_intruder(intruder_id, emb, face_crop, camera_id="cam_0"):
             )
 
         photo_url = supabase.storage.from_("intruder-photos").get_public_url(file_name)
+        
         data = {
             "intruder_id": intruder_id,
             "camera_id": camera_id,
@@ -143,35 +146,69 @@ def save_intruder(intruder_id, emb, face_crop, camera_id="cam_0"):
             "photo_url": photo_url,
         }
         supabase.table("intruders").insert(data).execute()
-        print(f"Logged intruder {intruder_id} with photo → {photo_url}")
+        print(f"✅ Logged intruder {intruder_id} with photo → {photo_url}")
+        
     except Exception as e:
-        print("Upload failed → Check Supabase policies for bucket 'intruder-photos'")
+        print("❌ Upload failed → Check Supabase policies for bucket 'intruder-photos'")
         print("Error details:", e)
     finally:
         try:
             os.unlink(tmp_file.name)
         except:
             pass
+    
+    return photo_url  # Return the photo URL
 
-def send_telegram_alert(intruder_id, photo_url):
+
+# Fix for send_telegram_alert function
+def send_telegram_alert(intruder_id, photo_url, location):
+    """Send Telegram alert with intruder photo"""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print("Telegram credentials missing, skipping alert.")
+        print("⚠️ Telegram credentials missing, skipping alert.")
         return
-    message = f"Intruder Detected!\n\nID: {intruder_id}\nPhoto: {photo_url}"
+    
+    message = f"🚨 *INTRUDER ALERT!*\n\n"
+    message += f"📍 Location: {location}\n"
+    message += f"🆔 ID: {intruder_id}\n"
+    message += f"🕐 Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
 
     try:
-        requests.post(
+        # Send text message
+        response = requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            data={"chat_id": TELEGRAM_CHAT_ID, "text": message}
+            data={
+                "chat_id": TELEGRAM_CHAT_ID, 
+                "text": message,
+                "parse_mode": "Markdown"
+            },
+            timeout=10
         )
+        
+        if response.status_code != 200:
+            print(f"❌ Telegram message failed: {response.text}")
+            return
+        
+        print(f"✅ Telegram message sent for {intruder_id}")
+        
+        # Send photo if available
         if photo_url:
-            requests.post(
+            photo_response = requests.post(
                 f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto",
-                data={"chat_id": TELEGRAM_CHAT_ID, "photo": photo_url}
+                data={
+                    "chat_id": TELEGRAM_CHAT_ID, 
+                    "photo": photo_url,
+                    "caption": f"Intruder: {intruder_id}"
+                },
+                timeout=10
             )
-        print(f"Telegram alert sent for {intruder_id}")
+            
+            if photo_response.status_code == 200:
+                print(f"✅ Telegram photo sent for {intruder_id}")
+            else:
+                print(f"❌ Telegram photo failed: {photo_response.text}")
+                
     except Exception as e:
-        print("Telegram send failed:", e)
+        print(f"❌ Telegram send failed: {e}")
 
 def send_servo_command(error_x, error_y):
     if esp is None:
@@ -365,7 +402,7 @@ def run_camera(camera_id, known_embeddings):
         frame_count += 1
         
         if frame_count % PROCESS_EVERY_N_FRAMES != 0:
-            time.sleep(0.033)  # ~30 FPS
+            time.sleep(0.033)
             continue
 
         current_time = time.time()
@@ -391,10 +428,13 @@ def run_camera(camera_id, known_embeddings):
                     "verified": False,
                     "label": None
                 }
+            
+            # Servo tracking
             frame_cx, frame_cy = frame.shape[1] // 2, frame.shape[0] // 2
             face_cx, face_cy = x + w // 2, y + h // 2
             error_x, error_y = face_cx - frame_cx, face_cy - frame_cy
             send_servo_command(error_x, error_y)
+            
             tracker = face_trackers[face_key]
             tracker["last_seen"] = current_time
             
@@ -404,21 +444,22 @@ def run_camera(camera_id, known_embeddings):
             face_crop = frame[y:y+h, x:x+w]
             recognized, emb = recognize_face(face_crop, known_embeddings)
 
-            if recognized:
+            if recognized:  # AUTHORIZED USER
                 last_seen[recognized] = current_time
                 if flags.get(recognized, 0) == 0:
                     flags[recognized] = 1
                     log_event_no_snapshot(camera_id, f"Authorized: {recognized}")
-                    print(f"Authorized: {recognized}")
+                    print(f"✅ Authorized: {recognized}")
                 
                 tracker["verified"] = True
                 tracker["label"] = f"Authorized: {recognized}"
                 tracker["buffer"] = []
 
-            else:
+            else:  # UNKNOWN FACE
                 if emb is None:
                     continue
                     
+                # Check if it's a known intruder
                 matched_intruder = None
                 for intruder_id, reps in intruder_embeddings.items():
                     for ref_emb in reps:
@@ -428,15 +469,16 @@ def run_camera(camera_id, known_embeddings):
                     if matched_intruder:
                         break
 
-                if matched_intruder:
+                if matched_intruder:  # KNOWN INTRUDER
                     if not tracker["verified"]:
                         label = f"Intruder ({matched_intruder})"
                         log_event(camera_id, label, frame, x, y, w, h, (0, 0, 255))
-                        print(f"Known intruder: {matched_intruder}")
+                        print(f"⚠️ Known intruder: {matched_intruder}")
                         tracker["verified"] = True
                         tracker["label"] = label
                         tracker["buffer"] = []
-                else:
+                        
+                else:  # NEW INTRUDER
                     tracker["buffer"].append(emb)
                     
                     if len(tracker["buffer"]) >= 8:
@@ -444,24 +486,35 @@ def run_camera(camera_id, known_embeddings):
                         intruder_embeddings[intruder_id] = [emb]
                         flags[intruder_id] = -1
                         
-                        threading.Thread(
-                            target=save_intruder,
-                            args=(intruder_id, np.array(emb), face_crop, cameras[camera_id]["id"]),
-                            daemon=True
-                        ).start()
+                        # FIXED: Save intruder and get photo URL synchronously
+                        photo_url = save_intruder(
+                            intruder_id, 
+                            np.array(emb), 
+                            face_crop, 
+                            cameras[camera_id]["id"]
+                        )
                         
                         intruder_count += 1
                         label = f"Intruder ({intruder_id})"
+                        
+                        # Log event
                         log_event(camera_id, label, frame, x, y, w, h, (0, 0, 255))
-                        photo_url = supabase.storage.from_("intruder-photos").get_public_url(f"{intruder_id}.jpg")
-                        send_telegram_alert(intruder_id, photo_url)
+                        
+                        # Send Telegram alert with the actual photo URL
+                        if photo_url:
+                            threading.Thread(
+                                target=send_telegram_alert,
+                                args=(intruder_id, photo_url, cameras[camera_id]["location"]),
+                                daemon=True
+                            ).start()
 
-                        print(f"NEW INTRUDER: {intruder_id}")
+                        print(f"🚨 NEW INTRUDER: {intruder_id}")
                         
                         tracker["verified"] = True
                         tracker["label"] = label
                         tracker["buffer"] = []
-                    else:
+                        
+                    else:  # Still verifying
                         verification_data = {
                             "type": "verification",
                             "camera_id": cameras[camera_id]["id"],
@@ -550,7 +603,7 @@ def camera_feed(camera_id: int):
         }
     )
 
-@app.lifespan("startup")
+@app.on_event("startup")
 
 def startup_event():
     known_embeddings = build_embeddings()
