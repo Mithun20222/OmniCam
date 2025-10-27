@@ -8,6 +8,7 @@ __pycache__/
 
 # Virtual environment
 .venv/
+venv/
 
 # OS-specific
 .DS_Store
@@ -25,6 +26,7 @@ dist/
 # Data (your authorized images and any captured faces)
 data/authorized/*
 !data/authorized/.gitkeep
+snapshots/
 
 # Models (if DeepFace or other libs download them locally)
 *.h5

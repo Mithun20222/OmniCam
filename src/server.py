@@ -106,9 +106,14 @@ last_snapshot_time = {}
 SNAPSHOT_COOLDOWN = 5
 event_queue = queue.Queue()
 
-load_dotenv()
+dotenv_path = os.path.join(os.path.dirname(__file__), '.env')
+load_dotenv(dotenv_path=dotenv_path)
+
 url = os.getenv("SUPABASE_URL")
 key = os.getenv("SUPABASE_KEY")
+
+print("Loaded SUPABASE_URL:", url)  # ✅ Debug print
+print("Loaded SUPABASE_KEY:", "FOUND" if key else "MISSING")
 supabase: Client = create_client(url, key)
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -162,51 +167,53 @@ def save_intruder(intruder_id, emb, face_crop, camera_id="cam_0"):
 
 # Fix for send_telegram_alert function
 def send_telegram_alert(intruder_id, photo_url, location):
-    """Send Telegram alert with intruder photo"""
+    """Send Telegram alert with intruder photo (safe version, no markdown parsing)"""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         print("⚠️ Telegram credentials missing, skipping alert.")
         return
     
-    message = f"🚨 *INTRUDER ALERT!*\n\n"
-    message += f"📍 Location: {location}\n"
-    message += f"🆔 ID: {intruder_id}\n"
-    message += f"🕐 Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    message = (
+        "🚨 INTRUDER ALERT!\n\n"
+        f"📍 Location: {location}\n"
+        f"🆔 ID: {intruder_id}\n"
+        f"🕐 Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    )
 
     try:
-        # Send text message
+        # Send plain text message (no Markdown parsing)
         response = requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
             data={
-                "chat_id": TELEGRAM_CHAT_ID, 
+                "chat_id": TELEGRAM_CHAT_ID,
                 "text": message,
-                "parse_mode": "Markdown"
+                "parse_mode": "HTML"  # safer than Markdown
             },
             timeout=10
         )
-        
+
         if response.status_code != 200:
             print(f"❌ Telegram message failed: {response.text}")
             return
         
         print(f"✅ Telegram message sent for {intruder_id}")
-        
+
         # Send photo if available
         if photo_url:
             photo_response = requests.post(
                 f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto",
                 data={
-                    "chat_id": TELEGRAM_CHAT_ID, 
+                    "chat_id": TELEGRAM_CHAT_ID,
                     "photo": photo_url,
-                    "caption": f"Intruder: {intruder_id}"
+                    "caption": f"Intruder detected: {intruder_id}"
                 },
                 timeout=10
             )
-            
+
             if photo_response.status_code == 200:
                 print(f"✅ Telegram photo sent for {intruder_id}")
             else:
                 print(f"❌ Telegram photo failed: {photo_response.text}")
-                
+
     except Exception as e:
         print(f"❌ Telegram send failed: {e}")
 
