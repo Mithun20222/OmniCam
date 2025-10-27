@@ -9,8 +9,8 @@ from dotenv import load_dotenv
 import tempfile
 import uuid
 import requests
+import serial
 
-# ---------- Load ENV ----------
 load_dotenv()
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
@@ -22,7 +22,14 @@ if not SUPABASE_URL or not SUPABASE_KEY:
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# ---------- Telegram Alert ----------
+try:
+    esp = serial.Serial('COM5', 115200, timeout=1)  # Change COM port for your setup
+    print("Connected to ESP32 on COM5")
+except Exception as e:
+    esp = None
+    print("ESP32 not connected:", e)
+
+# ---------------- Telegram ----------------
 def send_telegram_alert(message, photo_path=None):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -38,7 +45,7 @@ def send_telegram_alert(message, photo_path=None):
         print("Telegram error:", e)
 
 
-# ---------- Upload + Log Intruder ----------
+# ---------------- Upload + Log Intruder ----------------
 def save_intruder(intruder_id, emb, face_crop, camera_id="cam_0"):
     tmp_file = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
     cv2.imwrite(tmp_file.name, face_crop)
@@ -46,18 +53,13 @@ def save_intruder(intruder_id, emb, face_crop, camera_id="cam_0"):
     file_name = f"{intruder_id}_{uuid.uuid4().hex}.jpg"
 
     try:
-        # Upload to Supabase
         with open(tmp_file.name, "rb") as f:
             supabase.storage.from_("intruder-photos").upload(
-                file_name,
-                f,
-                {"content-type": "image/jpeg", "x-upsert": "true"}
+                file_name, f, {"content-type": "image/jpeg", "x-upsert": "true"}
             )
 
-        # Get public URL
         photo_url = supabase.storage.from_("intruder-photos").get_public_url(file_name)
 
-        # Save metadata in DB
         data = {
             "intruder_id": intruder_id,
             "camera_id": camera_id,
@@ -66,16 +68,16 @@ def save_intruder(intruder_id, emb, face_crop, camera_id="cam_0"):
         }
         supabase.table("intruders").insert(data).execute()
 
-        print(f"Logged intruder {intruder_id} → {photo_url}")
+        print(f"☁️ Logged intruder {intruder_id} → {photo_url}")
 
         send_telegram_alert(f"Intruder detected: {intruder_id}\nCamera: {camera_id}", tmp_file.name)
 
     except Exception as e:
-        print("Upload failed (check Supabase policies or bucket settings)")
+        print("Upload failed (check Supabase settings)")
         print("Error:", e)
 
 
-# ---------- Globals ----------
+# ---------------- Globals ----------------
 AUTHORIZED_DIR = "data/authorized"
 flags = {}
 intruder_embeddings = {}
@@ -86,7 +88,25 @@ last_seen = {}
 RESET_TIME = 3600  # 1 hour
 
 
-# ---------- Build embeddings ----------
+# ---------------- Servo Tracking ----------------
+def send_servo_command(error_x, error_y):
+    """Send pan/tilt correction commands to ESP32"""
+    if esp is None:
+        return
+    try:
+        if abs(error_x) > 25:
+            direction_x = "RIGHT" if error_x > 0 else "LEFT"
+            esp.write(f"PAN:{direction_x}\n".encode())
+
+        if abs(error_y) > 25:
+            direction_y = "UP" if error_y < 0 else "DOWN"
+            esp.write(f"TILT:{direction_y}\n".encode())
+
+    except Exception as e:
+        print("Serial send error:", e)
+
+
+# ---------------- Build embeddings ----------------
 def build_embeddings():
     embeddings = {}
     for person in os.listdir(AUTHORIZED_DIR):
@@ -115,7 +135,7 @@ def build_embeddings():
     return embeddings
 
 
-# ---------- Recognition ----------
+# ---------------- Recognition ----------------
 def cosine_distance(a, b):
     a, b = np.array(a), np.array(b)
     return 1 - np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
@@ -148,7 +168,7 @@ def recognize_face(frame, known_embeddings, threshold=0.6):
     return None, None
 
 
-# ---------- Main Loop ----------
+# ---------------- Main Loop ----------------
 def run_face_recognition(camera_index=0):
     global intruder_count, intruder_buffer
     known_embeddings = build_embeddings()
@@ -177,6 +197,12 @@ def run_face_recognition(camera_index=0):
             if face_crop.size == 0:
                 continue
 
+            # Track face position
+            frame_cx, frame_cy = frame.shape[1] // 2, frame.shape[0] // 2
+            face_cx, face_cy = x + w // 2, y + h // 2
+            error_x, error_y = face_cx - frame_cx, face_cy - frame_cy
+            send_servo_command(error_x, error_y)
+
             recognized, emb = recognize_face(face_crop, known_embeddings)
 
             if recognized:  # Authorized
@@ -203,7 +229,7 @@ def run_face_recognition(camera_index=0):
                     intruder_buffer.clear()
                 else:
                     intruder_buffer.append(emb)
-                    if len(intruder_buffer) >= 5:  # Confirm intruder
+                    if len(intruder_buffer) >= 5:
                         intruder_id = f"intruder_{intruder_count}"
                         intruder_embeddings[intruder_id] = [emb]
                         flags[intruder_id] = -1
@@ -219,12 +245,10 @@ def run_face_recognition(camera_index=0):
             stable_label = max(set(recent_labels), key=recent_labels.count)
 
             cv2.rectangle(frame, (x, y), (x+w, y+h), color, 2)
-            cv2.putText(
-                frame, stable_label, (x, y-10),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2
-            )
+            cv2.putText(frame, stable_label, (x, y-10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
-        cv2.imshow("Face Recognition (Stable)", frame)
+        cv2.imshow("OmniCam - Face Recognition + Tracking", frame)
 
         if cv2.waitKey(1) & 0xFF == ord("q"):
             break
