@@ -33,7 +33,7 @@ def find_working_cameras():
     """Find all working cameras on the system."""
     working_cameras = {}
     
-    print("🔍 Scanning for available cameras...")
+    print("Scanning for available cameras...")
     
     backends = [
         (cv2.CAP_MSMF, "Microsoft Media Foundation"),
@@ -54,7 +54,7 @@ def find_working_cameras():
         pass
     
     if not dshow_works:
-        print("⚠️ DirectShow not working on this system, skipping...")
+        print("DirectShow not working on this system, skipping...")
         backends = [b for b in backends if b[0] != cv2.CAP_DSHOW]
     
     # Only test the first working backend to avoid conflicts
@@ -71,7 +71,7 @@ def find_working_cameras():
                 if cap.isOpened():
                     ret, frame = cap.read()
                     if ret and frame is not None:
-                        print(f"✅ Found working camera {i} with {backend_name}")
+                        print(f"Found working camera {i} with {backend_name}")
                         working_cameras[i] = {
                             "id": f"cam{i+1}",
                             "location": f"Camera {i+1}",
@@ -83,7 +83,7 @@ def find_working_cameras():
                 else:
                     cap.release()
             except Exception as e:
-                print(f"⚠️ Error testing camera {i} with {backend_name}: {e}")
+                print(f"Error testing camera {i} with {backend_name}: {e}")
                 if 'cap' in locals():
                     cap.release()
         
@@ -100,7 +100,7 @@ def find_working_cameras():
             "backend": cv2.CAP_ANY,
             "backend_name": "Default"
         }
-        print("⚠️ Using fallback camera configuration")
+        print("Using fallback camera configuration")
     
     return working_cameras
 
@@ -157,7 +157,7 @@ def save_intruder(intruder_id, emb, face_crop, camera_id="cam_0"):
         supabase.table("intruders").insert(data).execute()
         print(f"☁️ Logged intruder {intruder_id} with photo → {photo_url}")
     except Exception as e:
-        print("❌ Upload failed → Check Supabase policies for bucket 'intruder-photos'")
+        print("Upload failed → Check Supabase policies for bucket 'intruder-photos'")
         print("Error details:", e)
     finally:
         try:
@@ -187,7 +187,7 @@ def build_embeddings():
         if reps:
             embeddings[person] = reps
             flags[person] = 0
-    print(f"✅ Loaded {len(embeddings)} authorized identities.")
+    print(f"Loaded {len(embeddings)} authorized identities.")
     return embeddings
 
 def cosine_distance(a, b):
