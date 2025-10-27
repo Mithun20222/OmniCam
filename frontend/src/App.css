@@ -18,7 +18,7 @@ body {
 /* Main Container */
 .app-container {
   min-height: 100vh;
-  background: linear-gradient(135deg, #0f172a 0%, #96ccd4 50%, #132f35 100%);
+  background: linear-gradient(135deg, #0f172a 0%, #581c87 50%, #0f172a 100%);
   padding: 24px;
 }
 
@@ -150,6 +150,8 @@ body {
   background: #000;
   border-radius: 0 0 12px 12px;
   padding: 0 !important;
+  position: relative;
+  overflow: hidden;
 }
 
 .feed-image {
@@ -157,6 +159,42 @@ body {
   height: 100%;
   object-fit: cover;
   display: block;
+}
+
+.feed-iframe {
+  width: 100%;
+  height: 100%;
+  border: none;
+  display: block;
+  background: #000;
+}
+
+.feed-error {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  color: #9ca3af;
+  background: #1f2937;
+}
+
+.fallback-icon {
+  font-size: 48px;
+  margin-bottom: 12px;
+}
+
+.fallback-text {
+  font-size: 16px;
+  margin-bottom: 8px;
+}
+
+.fallback-subtext {
+  font-size: 12px;
+  color: #6b7280;
+  text-align: center;
+  padding: 0 20px;
 }
 
 /* Verifying Badge */

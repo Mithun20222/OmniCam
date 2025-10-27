@@ -9,6 +9,7 @@ function App() {
   const [events, setEvents] = useState([]);
   const [latest, setLatest] = useState(null);
   const [verificationStatus, setVerificationStatus] = useState(null);
+  const [notifiedIntruders, setNotifiedIntruders] = useState(new Set());
 
   useEffect(() => {
     // Load cameras
@@ -64,27 +65,43 @@ function App() {
         setEvents((prev) => [event, ...prev].slice(0, 50));
         setVerificationStatus(null);
 
+        // Only show notification for NEW intruders (not already notified)
         if (
           event.label &&
           event.label.toLowerCase().includes("intruder") &&
           !event.label.toLowerCase().includes("verifying")
         ) {
-          toast.error(
-            `🚨 Intruder detected at ${event.location} (Camera: ${event.camera_id})`,
-            {
-              position: "top-right",
-              autoClose: 5000,
-              hideProgressBar: false,
-              closeOnClick: true,
-              pauseOnHover: true,
-              draggable: true,
-              style: {
-                backgroundColor: "#CFAB8D",
-                color: "#000",
-                fontWeight: "bold",
-              },
+          // Extract intruder ID from label like "Intruder (intruder_0)"
+          const intruderMatch = event.label.match(/intruder_\d+/);
+          const intruderId = intruderMatch ? intruderMatch[0] : event.id;
+
+          // Only notify if we haven't notified about this intruder yet
+          setNotifiedIntruders((prev) => {
+            if (!prev.has(intruderId)) {
+              toast.error(
+                `🚨 Intruder detected at ${event.location} (Camera: ${event.camera_id})`,
+                {
+                  position: "top-right",
+                  autoClose: 5000,
+                  hideProgressBar: false,
+                  closeOnClick: true,
+                  pauseOnHover: true,
+                  draggable: true,
+                  style: {
+                    backgroundColor: "#CFAB8D",
+                    color: "#000",
+                    fontWeight: "bold",
+                  },
+                }
+              );
+
+              // Add to notified set
+              const newSet = new Set(prev);
+              newSet.add(intruderId);
+              return newSet;
             }
-          );
+            return prev;
+          });
         }
       } catch (error) {
         console.error("Error parsing WebSocket message:", error);
@@ -98,16 +115,11 @@ function App() {
   const feedUrl = (cam) => {
     // Extract camera number from cam.id (e.g., "cam1" -> "1")
     const camNumber = (cam.id || "cam1").replace("cam", "");
-    const url = `http://localhost:8000/camera_feed/${camNumber}`;
-    console.log("Camera feed URL:", url, "for camera:", cam);
-    return url;
+    return `http://localhost:8000/camera_feed/${camNumber}`;
   };
 
   // Get first camera (fallback if not loaded)
   const cam1 = cameras[0] || { id: "cam1", location: "Camera 1" };
-  
-  console.log("Cameras loaded:", cameras);
-  console.log("Using cam1:", cam1);
 
   return (
     <div className="app-container">
@@ -126,7 +138,9 @@ function App() {
           <div className="summary-text">Intelligent Security System</div>
         </div>
         <div className="summary-right">
-          <div className="summary-text">{cameras.length} Camera{cameras.length !== 1 ? 's' : ''}</div>
+          <div className="summary-text">
+            {cameras.length} Camera{cameras.length !== 1 ? "s" : ""}
+          </div>
           <div className="summary-text">{events.length} Events</div>
         </div>
       </div>
@@ -144,10 +158,10 @@ function App() {
           </div>
 
           <div className="panel-body camera-feed">
-            <img
+            <iframe
               src={feedUrl(cam1)}
-              alt="Cam-1 feed"
-              className="feed-image"
+              title="Cam-1 feed"
+              className="feed-iframe"
               key={cam1.id}
             />
 
@@ -263,7 +277,9 @@ function App() {
                     <div className="history-details">
                       <div className="history-top">
                         <div className="history-label">{e.label}</div>
-                        <div className="history-number">#{events.length - idx}</div>
+                        <div className="history-number">
+                          #{events.length - idx}
+                        </div>
                       </div>
                       <div className="history-location">
                         {e.camera_id} • {e.location}

@@ -5,12 +5,14 @@ import time
 import uuid
 import threading
 import tempfile
+import queue
+import asyncio
 import numpy as np
 from datetime import datetime
 from collections import deque
 from deepface import DeepFace
-from fastapi import FastAPI, WebSocket
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, WebSocket, HTTPException
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from supabase import create_client, Client
 from dotenv import load_dotenv
@@ -23,20 +25,23 @@ os.makedirs(SNAPSHOT_DIR, exist_ok=True)
 # Camera configuration - will be populated dynamically
 cameras = {}
 
+# Shared frame buffers for each camera
+camera_frames = {}  # {camera_id: {"frame": np.array, "timestamp": float}}
+camera_locks = {}   # {camera_id: threading.Lock()}
+
 def find_working_cameras():
     """Find all working cameras on the system."""
     working_cameras = {}
     
     print("🔍 Scanning for available cameras...")
     
-    # Try different backends in order of preference, but skip DirectShow if it fails
     backends = [
         (cv2.CAP_MSMF, "Microsoft Media Foundation"),
         (cv2.CAP_ANY, "Any Available"),
-        (cv2.CAP_DSHOW, "DirectShow")  # Try DirectShow last
+        (cv2.CAP_DSHOW, "DirectShow")
     ]
     
-    # First, test if DirectShow works at all
+    # Test if DirectShow works
     dshow_works = False
     try:
         test_cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
@@ -52,15 +57,18 @@ def find_working_cameras():
         print("⚠️ DirectShow not working on this system, skipping...")
         backends = [b for b in backends if b[0] != cv2.CAP_DSHOW]
     
+    # Only test the first working backend to avoid conflicts
     for backend, backend_name in backends:
         print(f"Testing {backend_name} backend...")
+        found_any = False
         
-        # Test up to 5 camera indices
         for i in range(5):
+            if i in working_cameras:  # Skip if already found with another backend
+                continue
+                
             try:
                 cap = cv2.VideoCapture(i, backend)
                 if cap.isOpened():
-                    # Try to read a frame to confirm it's working
                     ret, frame = cap.read()
                     if ret and frame is not None:
                         print(f"✅ Found working camera {i} with {backend_name}")
@@ -70,6 +78,7 @@ def find_working_cameras():
                             "backend": backend,
                             "backend_name": backend_name
                         }
+                        found_any = True
                     cap.release()
                 else:
                     cap.release()
@@ -77,10 +86,14 @@ def find_working_cameras():
                 print(f"⚠️ Error testing camera {i} with {backend_name}: {e}")
                 if 'cap' in locals():
                     cap.release()
+        
+        # Stop after first working backend to avoid conflicts
+        if found_any:
+            print(f"✅ Using {backend_name} backend for all cameras")
+            break
     
     if not working_cameras:
         print("❌ No working cameras found!")
-        # Fallback to default camera 0 with ANY backend
         working_cameras[0] = {
             "id": "cam1", 
             "location": "Default Camera",
@@ -94,19 +107,25 @@ def find_working_cameras():
 # Initialize cameras
 cameras = find_working_cameras()
 
+# Initialize frame buffers and locks for each camera
+for cam_id in cameras.keys():
+    camera_frames[cam_id] = {"frame": None, "timestamp": 0}
+    camera_locks[cam_id] = threading.Lock()
+
 # ----------------- Globals -----------------
 flags = {}
 intruder_embeddings = {}
 intruder_count = 0
-intruder_buffer = []
-events = []
+events = deque(maxlen=500)
 recent_labels = deque(maxlen=5)
 last_seen = {}
-RESET_TIME = 3600  # 1 hour
+RESET_TIME = 3600
 ws_clients = []
-# Track last snapshot time to prevent excessive snapshots
 last_snapshot_time = {}
-SNAPSHOT_COOLDOWN = 5  # seconds between snapshots for same person
+SNAPSHOT_COOLDOWN = 5
+
+# WebSocket event queue
+event_queue = queue.Queue()
 
 # ----------------- Supabase -----------------
 load_dotenv()
@@ -114,12 +133,10 @@ url = os.getenv("SUPABASE_URL")
 key = os.getenv("SUPABASE_KEY")
 supabase: Client = create_client(url, key)
 
-
 def save_intruder(intruder_id, emb, face_crop, camera_id="cam_0"):
     """Upload intruder image + metadata to Supabase"""
     tmp_file = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
     cv2.imwrite(tmp_file.name, face_crop)
-
     file_name = f"{intruder_id}_{uuid.uuid4().hex}.jpg"
 
     try:
@@ -131,7 +148,6 @@ def save_intruder(intruder_id, emb, face_crop, camera_id="cam_0"):
             )
 
         photo_url = supabase.storage.from_("intruder-photos").get_public_url(file_name)
-
         data = {
             "intruder_id": intruder_id,
             "camera_id": camera_id,
@@ -140,11 +156,14 @@ def save_intruder(intruder_id, emb, face_crop, camera_id="cam_0"):
         }
         supabase.table("intruders").insert(data).execute()
         print(f"☁️ Logged intruder {intruder_id} with photo → {photo_url}")
-
     except Exception as e:
         print("❌ Upload failed → Check Supabase policies for bucket 'intruder-photos'")
         print("Error details:", e)
-
+    finally:
+        try:
+            os.unlink(tmp_file.name)
+        except:
+            pass
 
 # ----------------- FACE UTILS -----------------
 def build_embeddings():
@@ -171,11 +190,9 @@ def build_embeddings():
     print(f"✅ Loaded {len(embeddings)} authorized identities.")
     return embeddings
 
-
 def cosine_distance(a, b):
     a, b = np.array(a), np.array(b)
     return 1 - np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
-
 
 def recognize_face(frame, known_embeddings, threshold=0.6):
     try:
@@ -197,7 +214,6 @@ def recognize_face(frame, known_embeddings, threshold=0.6):
         print("Recognition error:", e)
     return None, None
 
-
 # ----------------- SNAPSHOTS + EVENTS -----------------
 def save_snapshot(frame, label, x, y, w, h, color):
     annotated = frame.copy()
@@ -209,8 +225,11 @@ def save_snapshot(frame, label, x, y, w, h, color):
     cv2.imwrite(path, annotated)
     return path
 
+def broadcast_event(event):
+    """Queue event for WebSocket broadcasting"""
+    event_queue.put(event)
 
-def log_event_no_snapshot(camera_id, label, frame, x, y, w, h, color):
+def log_event_no_snapshot(camera_id, label):
     """Log event without snapshot (for authorized users)."""
     event = {
         "id": uuid.uuid4().hex,
@@ -218,28 +237,15 @@ def log_event_no_snapshot(camera_id, label, frame, x, y, w, h, color):
         "location": cameras[camera_id]["location"],
         "timestamp": datetime.utcnow().isoformat(),
         "label": label,
-        "image_path": None  # No snapshot for authorized users
+        "image_path": None
     }
-    
-    # Add to events
     events.append(event)
-    
-    # push via WebSocket
-    for ws in ws_clients:
-        try:
-            import asyncio
-            asyncio.run(ws.send_json(event))
-        except:
-            pass
-    
+    broadcast_event(event)
     return event
 
-
 def log_event(camera_id, label, frame, x, y, w, h, color):
-    """Log confirmed intruder event with snapshot. Only called for intruders."""
+    """Log confirmed intruder event with snapshot."""
     current_time = time.time()
-    
-    # Only take snapshot for intruders
     should_snapshot = True
     
     if "Intruder" in label and "intruder_" in label:
@@ -249,7 +255,6 @@ def log_event(camera_id, label, frame, x, y, w, h, color):
         else:
             last_snapshot_time[intruder_id] = current_time
     
-    # Create event with snapshot (only for intruders)
     event = {
         "id": uuid.uuid4().hex,
         "camera_id": cameras[camera_id]["id"],
@@ -258,52 +263,123 @@ def log_event(camera_id, label, frame, x, y, w, h, color):
         "label": label,
         "image_path": save_snapshot(frame, label, x, y, w, h, color) if should_snapshot else None
     }
-    
-    # Add to events
     events.append(event)
-    
-    # push via WebSocket
-    for ws in ws_clients:
-        try:
-            import asyncio
-            asyncio.run(ws.send_json(event))
-        except:
-            pass
-    
+    broadcast_event(event)
     return event
 
+# ----------------- WEBSOCKET BROADCASTER -----------------
+def websocket_broadcaster():
+    """Background thread to broadcast events to WebSocket clients"""
+    print("🔌 WebSocket broadcaster started")
+    while True:
+        try:
+            event = event_queue.get(timeout=1)
+            dead_clients = []
+            
+            for ws in ws_clients[:]:
+                try:
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    loop.run_until_complete(ws.send_json(event))
+                    loop.close()
+                except Exception as e:
+                    dead_clients.append(ws)
+            
+            for ws in dead_clients:
+                if ws in ws_clients:
+                    ws_clients.remove(ws)
+                    
+        except queue.Empty:
+            continue
+        except Exception as e:
+            print(f"Broadcaster error: {e}")
 
-# ----------------- CAMERA LOOP -----------------
-def run_camera(camera_id, known_embeddings):
-    global intruder_count, intruder_buffer
-    
-    # Get the backend for this camera
+# ----------------- CAMERA CAPTURE THREAD -----------------
+def camera_capture_thread(camera_id):
+    """
+    Dedicated thread to continuously capture frames from camera
+    and store them in shared buffer. This runs independently.
+    """
     camera_info = cameras.get(camera_id, {})
     backend = camera_info.get("backend", cv2.CAP_ANY)
     backend_name = camera_info.get("backend_name", "Default")
     
-    print(f"🎥 Starting camera {camera_id} with {backend_name} backend...")
+    print(f"📹 Starting capture thread for camera {camera_id} with {backend_name}")
     
     cap = cv2.VideoCapture(camera_id, backend)
     if not cap.isOpened():
-        print(f"❌ Failed to open camera {camera_id} with {backend_name}")
+        print(f"❌ Failed to open camera {camera_id}")
         return
     
-    print(f"✅ Camera {camera_id} opened successfully with {backend_name}")
-    
-    # Set camera properties for better performance
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
     cap.set(cv2.CAP_PROP_FPS, 30)
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    
+    print(f"✅ Camera {camera_id} capture started")
+    
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            print(f"⚠️ Failed to read from camera {camera_id}")
+            time.sleep(0.1)
+            continue
+        
+        # Update shared frame buffer
+        with camera_locks[camera_id]:
+            camera_frames[camera_id]["frame"] = frame.copy()
+            camera_frames[camera_id]["timestamp"] = time.time()
+    
+    cap.release()
+
+# ----------------- FACE RECOGNITION THREAD -----------------
+def run_camera(camera_id, known_embeddings):
+    """
+    Process frames from shared buffer for face recognition.
+    This reads from camera_frames instead of opening camera directly.
+    """
+    global intruder_count
+    
+    print(f"🎥 Starting face recognition for camera {camera_id}")
     
     face_cascade = cv2.CascadeClassifier(
         cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
     )
+    
+    face_trackers = {}
+    TRACKER_TIMEOUT = 2.0
+    frame_count = 0
+    PROCESS_EVERY_N_FRAMES = 3  # Process every 3rd frame
+
+    # Wait for first frame
+    while camera_frames[camera_id]["frame"] is None:
+        print(f"⏳ Waiting for first frame from camera {camera_id}...")
+        time.sleep(0.5)
+    
+    print(f"✅ Face recognition started for camera {camera_id}")
 
     while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
+        # Get frame from shared buffer
+        with camera_locks[camera_id]:
+            frame = camera_frames[camera_id]["frame"]
+            if frame is None:
+                time.sleep(0.1)
+                continue
+            frame = frame.copy()  # Copy to avoid threading issues
+
+        frame_count += 1
+        
+        if frame_count % PROCESS_EVERY_N_FRAMES != 0:
+            time.sleep(0.033)  # ~30 FPS
+            continue
+
+        current_time = time.time()
+        
+        # Clean up old trackers
+        face_trackers = {
+            k: v for k, v in face_trackers.items() 
+            if current_time - v["last_seen"] < TRACKER_TIMEOUT
+        }
 
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         faces = face_cascade.detectMultiScale(gray, 1.1, 5, minSize=(60, 60))
@@ -311,19 +387,41 @@ def run_camera(camera_id, known_embeddings):
         for (x, y, w, h) in faces:
             if w < 80 or h < 80:
                 continue
+                
+            face_key = f"{x//50}_{y//50}"
+            
+            if face_key not in face_trackers:
+                face_trackers[face_key] = {
+                    "buffer": [],
+                    "last_seen": current_time,
+                    "verified": False,
+                    "label": None
+                }
+            
+            tracker = face_trackers[face_key]
+            tracker["last_seen"] = current_time
+            
+            if tracker["verified"] and tracker["label"]:
+                continue
+            
             face_crop = frame[y:y+h, x:x+w]
             recognized, emb = recognize_face(face_crop, known_embeddings)
 
-            if recognized:  # Authorized
-                intruder_buffer.clear()
-                last_seen[recognized] = time.time()
-                if flags[recognized] == 0:
+            if recognized:
+                last_seen[recognized] = current_time
+                if flags.get(recognized, 0) == 0:
                     flags[recognized] = 1
-                    # Log authorized user detection without snapshot
-                    log_event_no_snapshot(camera_id, f"Authorized: {recognized}", frame, x, y, w, h, (0, 255, 0))
-                label, color = f"Authorized: {recognized}", (0, 255, 0)
+                    log_event_no_snapshot(camera_id, f"Authorized: {recognized}")
+                    print(f"✅ Authorized: {recognized}")
+                
+                tracker["verified"] = True
+                tracker["label"] = f"Authorized: {recognized}"
+                tracker["buffer"] = []
 
-            else:  # Intruder check
+            else:
+                if emb is None:
+                    continue
+                    
                 matched_intruder = None
                 for intruder_id, reps in intruder_embeddings.items():
                     for ref_emb in reps:
@@ -334,42 +432,44 @@ def run_camera(camera_id, known_embeddings):
                         break
 
                 if matched_intruder:
-                    label, color = f"Intruder ({matched_intruder})", (0, 0, 255)
-                    intruder_buffer.clear()
+                    if not tracker["verified"]:
+                        label = f"Intruder ({matched_intruder})"
+                        log_event(camera_id, label, frame, x, y, w, h, (0, 0, 255))
+                        print(f"⚠️ Known intruder: {matched_intruder}")
+                        tracker["verified"] = True
+                        tracker["label"] = label
+                        tracker["buffer"] = []
                 else:
-                    intruder_buffer.append(emb)
-                    if len(intruder_buffer) >= 8:  # only after 8 frames
+                    tracker["buffer"].append(emb)
+                    
+                    if len(tracker["buffer"]) >= 8:
                         intruder_id = f"intruder_{intruder_count}"
                         intruder_embeddings[intruder_id] = [emb]
                         flags[intruder_id] = -1
-                        save_intruder(intruder_id, np.array(emb), face_crop)
+                        
+                        threading.Thread(
+                            target=save_intruder,
+                            args=(intruder_id, np.array(emb), face_crop, cameras[camera_id]["id"]),
+                            daemon=True
+                        ).start()
+                        
                         intruder_count += 1
-                        label, color = f"Intruder ({intruder_id})", (0, 0, 255)
-                        intruder_buffer.clear()
-                        print(f"⚠️ Intruder detected: {intruder_id}")
-                        # Only log event when intruder is confirmed
-                        log_event(camera_id, label, frame, x, y, w, h, color)
+                        label = f"Intruder ({intruder_id})"
+                        log_event(camera_id, label, frame, x, y, w, h, (0, 0, 255))
+                        print(f"🚨 NEW INTRUDER: {intruder_id}")
+                        
+                        tracker["verified"] = True
+                        tracker["label"] = label
+                        tracker["buffer"] = []
                     else:
-                        label, color = "Verifying...", (0, 255, 255)
-                        # Send verification status via WebSocket
                         verification_data = {
                             "type": "verification",
                             "camera_id": cameras[camera_id]["id"],
                             "location": cameras[camera_id]["location"],
-                            "status": "verifying"
+                            "status": "verifying",
+                            "buffer_count": len(tracker["buffer"])
                         }
-                        for ws in ws_clients:
-                            try:
-                                import asyncio
-                                asyncio.run(ws.send_json(verification_data))
-                            except:
-                                pass
-
-            recent_labels.append(label)
-            stable_label = max(set(recent_labels), key=recent_labels.count)
-
-    cap.release()
-
+                        broadcast_event(verification_data)
 
 # ----------------- FASTAPI APP -----------------
 app = FastAPI()
@@ -380,104 +480,81 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-# Replace the gen_frames and camera_feed functions with these fixed versions:
-
-from fastapi.responses import StreamingResponse
 
 def gen_frames(camera_id=0):
-    """Generate frames for camera stream."""
-    # Get the backend for this camera
-    camera_info = cameras.get(camera_id, {})
-    backend = camera_info.get("backend", cv2.CAP_ANY)
-    backend_name = camera_info.get("backend_name", "Default")
+    """
+    Stream frames from shared buffer instead of opening camera directly.
+    This prevents conflicts with the capture thread.
+    """
+    print(f"📺 Starting stream for camera {camera_id}")
     
-    print(f"📺 Starting stream for camera {camera_id} with {backend_name} backend...")
+    # Wait for camera to start capturing
+    timeout = 10
+    start_time = time.time()
+    while camera_frames.get(camera_id, {}).get("frame") is None:
+        if time.time() - start_time > timeout:
+            print(f"❌ Timeout waiting for camera {camera_id}")
+            
+            import io
+            from PIL import Image, ImageDraw
+            
+            img = Image.new('RGB', (640, 480), color=(50, 50, 50))
+            draw = ImageDraw.Draw(img)
+            draw.text((200, 220), "Camera Unavailable", fill=(255, 255, 255))
+            
+            img_byte_arr = io.BytesIO()
+            img.save(img_byte_arr, format='JPEG')
+            img_byte_arr = img_byte_arr.getvalue()
+            
+            while True:
+                yield (b'--frame\r\n'
+                       b'Content-Type: image/jpeg\r\n\r\n' + img_byte_arr + b'\r\n')
+                time.sleep(1)
+            return
+        
+        time.sleep(0.1)
     
-    cap = cv2.VideoCapture(int(camera_id), backend)
-    if not cap.isOpened():
-        print(f"❌ Failed to open camera {camera_id} for streaming with {backend_name}")
-        # Return a blank frame or error image instead of returning nothing
-        import io
-        from PIL import Image, ImageDraw, ImageFont
-        
-        # Create error image
-        img = Image.new('RGB', (640, 480), color=(50, 50, 50))
-        draw = ImageDraw.Draw(img)
-        draw.text((200, 220), "Camera Unavailable", fill=(255, 255, 255))
-        draw.text((220, 250), f"Camera {camera_id}", fill=(200, 200, 200))
-        
-        # Convert to bytes
-        img_byte_arr = io.BytesIO()
-        img.save(img_byte_arr, format='JPEG')
-        img_byte_arr = img_byte_arr.getvalue()
-        
-        # Yield error frame continuously
-        while True:
-            yield (b'--frame\r\n'
-                   b'Content-Type: image/jpeg\r\n\r\n' + img_byte_arr + b'\r\n')
-            time.sleep(1)  # Update every second
-        return
-        
-    print(f"✅ Camera {camera_id} stream started successfully with {backend_name}")
+    print(f"✅ Streaming camera {camera_id}")
     
-    # Set camera properties for streaming
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-    cap.set(cv2.CAP_PROP_FPS, 30)
-    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Reduce buffer for lower latency
-    
-    try:
-        while True:
-            success, frame = cap.read()
-            if not success:
-                print(f"❌ Failed to read frame from camera {camera_id}")
-                time.sleep(0.1)
+    while True:
+        with camera_locks[camera_id]:
+            frame = camera_frames[camera_id]["frame"]
+            if frame is None:
                 continue
-                
-            # Encode frame as JPEG with quality 80
-            ret, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
-            if not ret:
-                continue
-                
-            frame_bytes = buffer.tobytes()
-            yield (b'--frame\r\n'
-                   b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
-    except Exception as e:
-        print(f"❌ Error in gen_frames for camera {camera_id}: {e}")
-    finally:
-        cap.release()
-        print(f"📺 Stream ended for camera {camera_id}")
-
+            frame = frame.copy()
+        
+        ret, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        if not ret:
+            continue
+            
+        frame_bytes = buffer.tobytes()
+        yield (b'--frame\r\n'
+               b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+        
+        time.sleep(0.033)  # ~30 FPS
 
 @app.get("/camera_feed/{camera_id}")
 def camera_feed(camera_id: int):
-    """
-    Serve camera feed. 
-    Note: camera_id from URL is 1-based (cam1, cam2), 
-    but our cameras dict uses 0-based indexing.
-    """
-    # Convert 1-based URL parameter to 0-based camera index
+    if camera_id < 1 or camera_id > 10:
+        raise HTTPException(status_code=400, detail="Invalid camera ID")
+    
     actual_camera_id = camera_id - 1
     
-    print(f"📺 Camera feed requested for camera {camera_id} (actual index: {actual_camera_id})")
-    
-    # Verify camera exists
     if actual_camera_id not in cameras:
-        print(f"❌ Camera {actual_camera_id} not found in cameras dict")
-        print(f"Available cameras: {list(cameras.keys())}")
-        # Return the first available camera as fallback
         if cameras:
             actual_camera_id = list(cameras.keys())[0]
-            print(f"⚠️ Using fallback camera {actual_camera_id}")
         else:
             actual_camera_id = 0
-            print(f"⚠️ No cameras available, using default camera 0")
     
     return StreamingResponse(
         gen_frames(actual_camera_id),
-        media_type="multipart/x-mixed-replace; boundary=frame"
+        media_type="multipart/x-mixed-replace; boundary=frame",
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        }
     )
-
 
 @app.on_event("startup")
 def startup_event():
@@ -485,13 +562,26 @@ def startup_event():
     
     print(f"🚀 Starting OmniCam with {len(cameras)} detected camera(s)")
     
-    # Start camera threads for all detected cameras
+    # Start WebSocket broadcaster
+    threading.Thread(target=websocket_broadcaster, daemon=True).start()
+    
+    # Start camera capture and processing threads
     for cam_id, cam_info in cameras.items():
         print(f"🎥 Starting camera {cam_id} ({cam_info['id']}) - {cam_info['location']}")
+        
+        # Thread 1: Capture frames continuously
         threading.Thread(
-            target=run_camera, args=(cam_id, known_embeddings), daemon=True
+            target=camera_capture_thread, 
+            args=(cam_id,), 
+            daemon=True
         ).start()
-
+        
+        # Thread 2: Process frames for face recognition
+        threading.Thread(
+            target=run_camera, 
+            args=(cam_id, known_embeddings), 
+            daemon=True
+        ).start()
 
 @app.get("/cameras")
 def get_cameras():
@@ -499,7 +589,6 @@ def get_cameras():
 
 @app.get("/cameras/refresh")
 def refresh_cameras():
-    """Refresh camera detection and return updated camera list."""
     global cameras
     cameras = find_working_cameras()
     return {
@@ -507,112 +596,46 @@ def refresh_cameras():
         "cameras": list(cameras.values())
     }
 
-@app.get("/cameras/test/{camera_id}")
-def test_camera(camera_id: int):
-    """Test a specific camera to see if it's working."""
-    camera_info = cameras.get(camera_id, {})
-    backend = camera_info.get("backend", cv2.CAP_ANY)
-    backend_name = camera_info.get("backend_name", "Default")
-    
-    try:
-        cap = cv2.VideoCapture(camera_id, backend)
-        if cap.isOpened():
-            ret, frame = cap.read()
-            if ret and frame is not None:
-                cap.release()
-                return {
-                    "success": True,
-                    "message": f"Camera {camera_id} is working with {backend_name}",
-                    "frame_size": f"{frame.shape[1]}x{frame.shape[0]}",
-                    "backend": backend_name
-                }
-            else:
-                cap.release()
-                return {
-                    "success": False,
-                    "message": f"Camera {camera_id} opened but can't capture frames",
-                    "backend": backend_name
-                }
-        else:
-            return {
-                "success": False,
-                "message": f"Camera {camera_id} failed to open with {backend_name}",
-                "backend": backend_name
-            }
-    except Exception as e:
-        return {
-            "success": False,
-            "message": f"Error testing camera {camera_id}: {str(e)}",
-            "backend": backend_name
-        }
-
-@app.get("/camera_feed/test/{camera_id}")
-def test_camera_feed(camera_id: int):
-    """Test camera feed endpoint directly."""
-    try:
-        camera_info = cameras.get(camera_id, {})
-        backend = camera_info.get("backend", cv2.CAP_ANY)
-        backend_name = camera_info.get("backend_name", "Default")
-        
-        cap = cv2.VideoCapture(camera_id, backend)
-        if cap.isOpened():
-            ret, frame = cap.read()
-            if ret and frame is not None:
-                # Encode frame as JPEG
-                ret, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
-                if ret:
-                    cap.release()
-                    return {
-                        "success": True,
-                        "message": f"Camera {camera_id} feed test successful",
-                        "frame_size": f"{frame.shape[1]}x{frame.shape[0]}",
-                        "backend": backend_name,
-                        "jpeg_size": len(buffer)
-                    }
-                else:
-                    cap.release()
-                    return {"success": False, "message": "Failed to encode frame as JPEG"}
-            else:
-                cap.release()
-                return {"success": False, "message": "Failed to capture frame"}
-        else:
-            return {"success": False, "message": f"Failed to open camera {camera_id}"}
-    except Exception as e:
-        return {"success": False, "message": f"Error: {str(e)}"}
-
-
 @app.get("/events")
 def get_events():
-    return events[-50:]
-
+    return list(events)[-50:]
 
 @app.get("/events/latest")
 def latest_event():
-    return events[-1] if events else {}
-
+    return list(events)[-1] if events else {}
 
 @app.get("/snapshot/{event_id}")
 def get_snapshot(event_id: str):
     for e in events:
-        if e["id"] == event_id:
-            if e.get("image_path"):
-                return FileResponse(e["image_path"])
-            else:
-                return {"error": "No snapshot available for this event"}
-    return {"error": "Event not found"}
-
+        if e["id"] == event_id and e.get("image_path"):
+            return FileResponse(e["image_path"])
+    return {"error": "Snapshot not found"}
 
 @app.websocket("/ws/events")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     ws_clients.append(websocket)
+    print(f"✅ WebSocket client connected. Total: {len(ws_clients)}")
     try:
         while True:
             await websocket.receive_text()
-    except:
-        ws_clients.remove(websocket)
-
+    except Exception as e:
+        print(f"WebSocket disconnected: {e}")
+    finally:
+        if websocket in ws_clients:
+            ws_clients.remove(websocket)
+        print(f"❌ WebSocket disconnected. Total: {len(ws_clients)}")
 
 @app.get("/flags")
 def get_flags():
     return flags
+
+@app.get("/stats")
+def get_stats():
+    return {
+        "total_events": len(events),
+        "intruder_count": intruder_count,
+        "authorized_count": len([f for f in flags if flags[f] >= 0]),
+        "active_cameras": len(cameras),
+        "ws_clients": len(ws_clients)
+    }
