@@ -107,8 +107,7 @@ last_snapshot_time = {}
 SNAPSHOT_COOLDOWN = 5
 event_queue = queue.Queue()
 
-dotenv_path = os.path.join(os.path.dirname(__file__), '.env')
-load_dotenv(dotenv_path=dotenv_path)
+load_dotenv()
 
 url = os.getenv("SUPABASE_URL")
 key = os.getenv("SUPABASE_KEY")
