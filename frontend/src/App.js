@@ -3,6 +3,7 @@ import axios from "axios";
 import { ToastContainer, toast } from "react-toastify";
 import "react-toastify/dist/ReactToastify.css";
 import "./App.css";
+import JoystickControl from "./components/JoystickControl";
 
 function App() {
   const [cameras, setCameras] = useState([]);
@@ -115,8 +116,6 @@ function App() {
         console.error("Error parsing WebSocket message:", error);
       }
     };
-
-    return () => ws.close();
   }, []);
 
   // helper: pick camera feed url for a given cam object
@@ -244,64 +243,75 @@ function App() {
           </div>
         </div>
 
-        {/* Bottom: Full Event History (full width, scrollable) */}
-        <div className="panel frame-like history-panel full-width">
-          <div className="panel-header">
-            <div className="location-label">Event history</div>
-            <div className="subtext">All recorded events</div>
-          </div>
+        {/* Bottom: Full Event History and Joystick side by side */}
+        <div className="bottom-grid">
+          <div className="panel frame-like history-panel">
+            <div className="panel-header">
+              <div className="location-label">Event history</div>
+              <div className="subtext">All recorded events</div>
+            </div>
 
-          <div className="panel-body history-scroll">
-            {events.length === 0 ? (
-              <div className="empty-state">
-                <div className="empty-icon">📊</div>
-                <div className="empty-text">No events recorded yet</div>
-              </div>
-            ) : (
-              <div className="history-list">
-                {events.map((e, idx) => (
-                  <div key={e.id} className="history-item">
-                    <div className="history-thumbnail">
-                      {e.image_path ? (
-                        <img
-                          src={`http://localhost:8000/snapshot/${e.id}`}
-                          alt="snapshot"
-                          className="thumbnail-image"
-                          onError={(ev) => {
-                            ev.target.style.display = "none";
-                          }}
-                        />
-                      ) : (
-                        <div className="no-image">No image</div>
-                      )}
-                    </div>
+            <div className="panel-body history-scroll">
+              {events.length === 0 ? (
+                <div className="empty-state">
+                  <div className="empty-icon">📊</div>
+                  <div className="empty-text">No events recorded yet</div>
+                </div>
+              ) : (
+                <div className="history-list">
+                  {events.map((e, idx) => (
+                    <div key={e.id} className="history-item">
+                      <div className="history-thumbnail">
+                        {e.image_path ? (
+                          <img
+                            src={`http://localhost:8000/snapshot/${e.id}`}
+                            alt="snapshot"
+                            className="thumbnail-image"
+                            onError={(ev) => {
+                              ev.target.style.display = "none";
+                            }}
+                          />
+                        ) : (
+                          <div className="no-image">No image</div>
+                        )}
+                      </div>
 
-                    <div className="history-details">
-                      <div className="history-top">
-                        <div className="history-label">{e.label}</div>
-                        <div className="history-number">
-                          #{events.length - idx}
+                      <div className="history-details">
+                        <div className="history-top">
+                          <div className="history-label">{e.label}</div>
+                          <div className="history-number">
+                            #{events.length - idx}
+                          </div>
+                        </div>
+                        <div className="history-location">
+                          {e.camera_id} • {e.location}
+                        </div>
+                        <div className="history-timestamp">
+                          {new Date(e.timestamp).toLocaleString()}
                         </div>
                       </div>
-                      <div className="history-location">
-                        {e.camera_id} • {e.location}
-                      </div>
-                      <div className="history-timestamp">
-                        {new Date(e.timestamp).toLocaleString()}
-                      </div>
-                    </div>
 
-                    <div className="history-status">
-                      {e.label.toLowerCase().includes("intruder") ? (
-                        <span className="status-intruder">INTRUDER</span>
-                      ) : (
-                        <span className="status-authorized">AUTHORIZED</span>
-                      )}
+                      <div className="history-status">
+                        {e.label.toLowerCase().includes("intruder") ? (
+                          <span className="status-intruder">INTRUDER</span>
+                        ) : (
+                          <span className="status-authorized">AUTHORIZED</span>
+                        )}
+                      </div>
                     </div>
-                  </div>
-                ))}
-              </div>
-            )}
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="panel frame-like joystick-panel">
+            <JoystickControl />
+
+            {/* Centered button below joystick */}
+            <div className="joystick-button-container">
+              <button className="joystick-action-btn">Recenter Camera</button>
+            </div>
           </div>
         </div>
       </div>

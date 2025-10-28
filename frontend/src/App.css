@@ -7,8 +7,8 @@
 }
 
 body {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
-    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Roboto", "Oxygen",
+    "Ubuntu", "Cantarell", "Fira Sans", "Droid Sans", "Helvetica Neue",
     sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
@@ -78,6 +78,14 @@ body {
   grid-column: 1 / -1;
 }
 
+/* Bottom row grid for history + joystick */
+.bottom-grid {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: 2fr 1fr;
+  gap: 24px;
+}
+
 /* Panel Styles */
 .panel {
   background: rgba(30, 30, 40, 0.6);
@@ -95,7 +103,8 @@ body {
 
 .camera-panel,
 .event-panel,
-.history-panel {
+.history-panel,
+.joystick-panel {
   height: 420px;
 }
 
@@ -227,7 +236,8 @@ body {
 }
 
 @keyframes pulse {
-  0%, 100% {
+  0%,
+  100% {
     opacity: 1;
   }
   50% {
@@ -507,7 +517,7 @@ body {
   .app-container {
     padding: 16px;
   }
-  
+
   .main-grid {
     gap: 16px;
   }
@@ -517,17 +527,22 @@ body {
   .main-grid {
     grid-template-columns: 1fr;
   }
-  
+
   .camera-panel,
   .event-panel,
-  .history-panel {
+  .history-panel,
+  .joystick-panel {
     height: 350px;
   }
-  
+
   .summary-bar {
     flex-direction: column;
     gap: 12px;
     align-items: flex-start;
+  }
+
+  .bottom-grid {
+    grid-template-columns: 1fr;
   }
 }
 
@@ -539,4 +554,76 @@ body {
 
 .Toastify__progress-bar {
   background: rgba(0, 0, 0, 0.3) !important;
+}
+
+/* Joystick panel button styles */
+.joystick-button-container {
+  padding: 12px 16px;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  background: rgba(0, 0, 0, 0.3);
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.joystick-action-btn {
+  appearance: none;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  background: linear-gradient(
+    135deg,
+    rgba(17, 24, 39, 0.9),
+    rgba(31, 41, 55, 0.9)
+  );
+  color: #e5e7eb;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  padding: 8px 14px;
+  border-radius: 10px;
+  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.35),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  cursor: pointer;
+  transition: background 150ms ease, transform 80ms ease,
+    border-color 150ms ease, box-shadow 150ms ease;
+}
+
+.joystick-action-btn:hover {
+  background: linear-gradient(
+    135deg,
+    rgba(31, 41, 55, 0.95),
+    rgba(55, 65, 81, 0.95)
+  );
+  border-color: rgba(255, 255, 255, 0.25);
+}
+
+.joystick-action-btn:active {
+  transform: translateY(1px);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4),
+    inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+.joystick-action-btn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.35), 0 4px 10px rgba(0, 0, 0, 0.35);
+  border-color: rgba(99, 102, 241, 0.5);
+}
+
+/* Optional accent variant (unused but available) */
+.joystick-action-btn--accent {
+  background: linear-gradient(
+    135deg,
+    rgba(59, 130, 246, 0.95),
+    rgba(29, 78, 216, 0.95)
+  );
+  border-color: rgba(147, 197, 253, 0.5);
+  color: #f8fafc;
+}
+
+.joystick-action-btn--accent:hover {
+  background: linear-gradient(
+    135deg,
+    rgba(96, 165, 250, 1),
+    rgba(37, 99, 235, 1)
+  );
+  border-color: rgba(191, 219, 254, 0.6);
 }
