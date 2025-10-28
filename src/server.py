@@ -17,6 +17,7 @@ from supabase import create_client, Client
 from dotenv import load_dotenv
 import requests
 import serial
+from fastapi import Body
 
 AUTHORIZED_DIR = "data/authorized"
 SNAPSHOT_DIR = "snapshots"
@@ -440,7 +441,7 @@ def run_camera(camera_id, known_embeddings):
             frame_cx, frame_cy = frame.shape[1] // 2, frame.shape[0] // 2
             face_cx, face_cy = x + w // 2, y + h // 2
             error_x, error_y = face_cx - frame_cx, face_cy - frame_cy
-            send_servo_command(error_x, error_y)
+            #send_servo_command(error_x, error_y)
             
             tracker = face_trackers[face_key]
             tracker["last_seen"] = current_time
@@ -686,3 +687,20 @@ def get_stats():
         "active_cameras": len(cameras),
         "ws_clients": len(ws_clients)
     }
+
+@app.post("/servo_control")
+def servo_control(data: dict = Body(...)):
+    if esp is None:
+        raise HTTPException(status_code=500, detail="ESP32 not connected")
+    
+    direction = data.get("direction")
+    if not direction:
+        raise HTTPException(status_code=400, detail="Direction not specified")
+
+    try:
+        esp.write(f"{direction}\n".encode())
+        print(f"Manual servo control: {direction}")
+        return {"status": "ok", "sent": direction}
+    except Exception as e:
+        print("Serial write failed:", e)
+        raise HTTPException(status_code=500, detail=str(e))
