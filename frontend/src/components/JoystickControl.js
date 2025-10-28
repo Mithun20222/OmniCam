@@ -14,12 +14,19 @@ const JoystickControl = () => {
   const sendServoCommand = (x, y) => {
     const threshold = 0.2;
     if (Math.abs(x) > threshold || Math.abs(y) > threshold) {
-      fetch("http://localhost:8000/servo/control", {
+      // Determine direction based on which axis has larger magnitude
+      let direction;
+      if (Math.abs(x) > Math.abs(y)) {
+        direction = x > 0 ? "PAN:RIGHT" : "PAN:LEFT";
+      } else {
+        direction = y > 0 ? "TILT:DOWN" : "TILT:UP";
+      }
+
+      fetch("http://localhost:8000/servo_control", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          error_x: x * 100,
-          error_y: y * 100,
+          direction: direction,
         }),
       }).catch(console.error);
     }

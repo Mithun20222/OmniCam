@@ -18,7 +18,6 @@ from dotenv import load_dotenv
 import requests
 import serial
 from fastapi import Body
-from fastapi import Request
 
 AUTHORIZED_DIR = "data/authorized"
 SNAPSHOT_DIR = "snapshots"
@@ -108,8 +107,7 @@ last_snapshot_time = {}
 SNAPSHOT_COOLDOWN = 5
 event_queue = queue.Queue()
 
-dotenv_path = os.path.join(os.path.dirname(__file__), '.env')
-load_dotenv(dotenv_path=dotenv_path)
+load_dotenv()
 
 url = os.getenv("SUPABASE_URL")
 key = os.getenv("SUPABASE_KEY")
@@ -689,18 +687,19 @@ def get_stats():
         "ws_clients": len(ws_clients)
     }
 
-@app.post("/servo/control")
-async def servo_control(request: Request):
-    data = await request.json()
-    direction = data.get("direction", "")
-
+@app.post("/servo_control")
+def servo_control(data: dict = Body(...)):
     if esp is None:
-        return {"error": "ESP32 not connected"}
+        raise HTTPException(status_code=500, detail="ESP32 not connected")
+    
+    direction = data.get("direction")
+    if not direction:
+        raise HTTPException(status_code=400, detail="Direction not specified")
 
     try:
-        esp.write((direction + "\n").encode())
-        print(f"✅ Sent servo command: {direction}")
+        esp.write(f"{direction}\n".encode())
+        print(f"Manual servo control: {direction}")
         return {"status": "ok", "sent": direction}
     except Exception as e:
-        print("❌ Servo command failed:", e)
-        return {"error": str(e)}
+        print("Serial write failed:", e)
+        raise HTTPException(status_code=500, detail=str(e))
